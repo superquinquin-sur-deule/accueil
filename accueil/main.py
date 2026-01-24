@@ -10,7 +10,7 @@ from typing import Any
 from accueil.routes import basebp, registrationbp
 from accueil.channel import Channel
 from accueil.mail import MailManager
-from accueil.models.odoo import Odoo
+from accueil.models.odoo import OdooConnector
 from accueil.listeners import start_scheduler
 from accueil.middlewares import go_fast, log_exit, error_handler
 from accueil.loaders import ConfigLoader
@@ -50,7 +50,7 @@ class Accueil:
         self.app.error_handler.add(Exception, error_handler)
 
         self.app.ctx.channels = {"registration": Channel("registration", [])}
-        self.app.ctx.odoo = Odoo.initialize(**odoo["erp"])
+        self.app.ctx.odoo = OdooConnector(**odoo["erp"])
         if mail is not None:
             self.app.ctx.mail_manager = MailManager.initialize(**mail)
         else:

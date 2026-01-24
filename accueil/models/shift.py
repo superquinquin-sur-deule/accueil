@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from erppeek import Record
+from erppeek import Record, RecordList
 from attrs import define, field, validators
 from typing import Any, Optional, Literal
 
 from accueil.utils import translate_day, translate_shift_status, translate_coop_status
 
-
+# pyright: reportArgumentType=false
 
 @define
 class Cycle(object):
@@ -25,11 +25,11 @@ class Cycle(object):
 
     @classmethod
     def from_record(cls, shift_record: Record) -> Cycle:
-        end = datetime.fromisoformat(shift_record.date_begin_tz) # type: ignore # is actually end of cycle
+        end = datetime.fromisoformat(shift_record.date_begin_tz)
         begin = end - timedelta(days=28)
         return cls(
-            shift_record.id, # type: ignore
-            shift_record.name, # type: ignore
+            shift_record.id,
+            shift_record.name,
             begin,
             end
         )
@@ -40,32 +40,33 @@ class Cycle(object):
 
 @define(repr=False, slots=False, kw_only=True)
 class ShiftMember:
+    """most attrs are nullable because of associated shift members. for convenience, the struct is keeped"""
     #ids
     partner_id: int = field(validator=[validators.instance_of(int)])
     name: str = field(validator=[validators.instance_of(str)])
     barcode: int = field(validator=[validators.instance_of(int)])
 
-    shift_id: Optional[int] = field(default=None,)
-    registration_id: Optional[int] = field(default=None)
-    parent_partner_id: Optional[int] = field(default=None) #only for associated
+    shift_id: int | None = field(default=None,)
+    registration_id: int | None = field(default=None)
+    parent_partner_id: int | None = field(default=None) #only for associated
 
-    shift_type: Optional[str] = field(default=None)
-    begin: Optional[datetime] = field(default=None)
-    end: Optional[datetime] = field(default=None)
-    exchange_state: Optional[str] = field(default=None)
-    state: Optional[str] = field(default=None)
-    coop_state: Optional[str] = field(default=None)
+    shift_type: str | None = field(default=None)
+    begin: datetime | None = field(default=None)
+    end: datetime | None = field(default=None)
+    exchange_state: str | None = field(default=None)
+    state: str | None = field(default=None)
+    coop_state: str | None = field(default=None)
 
-    gender: Optional[str] = field(default="neutral")
+    gender: str | None = field(default="neutral")
     leader: bool = field(default=False)
-    std_counter: Optional[int] = field(default=None)
-    ftop_counter: Optional[int] = field(default=None)
-    mail: Optional[str] = field(default=None)
+    std_counter: int | None = field(default=None)
+    ftop_counter: int | None = field(default=None)
+    mail: str | None = field(default=None)
     has_associated_members: bool = field(default=False)
     is_associated_member: bool = field(default=False)
 
-    associated_members: Optional[list[ShiftMember]] = field(default=None)
-    cycle: Optional[Cycle] = field(default=None)
+    associated_members: list[ShiftMember] | None = field(default=None)
+    cycle: Cycle | None = field(default=None)
     cycle_type: Literal["standard", "ftop"] = field(default=None)
 
 
@@ -77,8 +78,8 @@ class ShiftMember:
         display_name = f"<strong>{self.barcode}</strong> -"
         if self.leader:
             display_name += f' <span class="leader">🌟</span> '
-        if len(self.associated_members) > 0: # type: ignore
-            display_name += f" {self.name} en binôme avec {self.associated_members[0].name}" # type: ignore
+        if self.associated_members is not None and len(self.associated_members) > 0:
+            display_name += f" {self.name} en binôme avec {self.associated_members[0].name}"
         else:
             display_name += f" {self.name}"
         if self.state == "done":
@@ -96,8 +97,8 @@ class ShiftMember:
     @property
     def payload(self) -> dict[str, Any]:
         associate_name = None
-        if len(self.associated_members) > 0: # type: ignore
-            associate_name = self.associated_members[0].name # type: ignore
+        if self.associated_members is not None and len(self.associated_members) > 0:
+            associate_name = self.associated_members[0].name
         return {
             "partner_id": self.partner_id,
             "registration_id": self.registration_id,
@@ -126,9 +127,12 @@ class ShiftMember:
     @property
     def admin_payload(self) -> dict[str, Any]:
         cycle_type = "standard"
-        if self.cycle_type == "ftop":
+        if self.cycle_type == "ftop" and self.cycle is not None:
             cycle_type = "volant"
-            cycle_name = self.cycle.cycle # type: ignore
+            cycle_name = self.cycle.cycle
+        elif self.cycle_type == "ftop":
+            cycle_type = "volant"
+            cycle_name = "/"
         else:
             cycle_name = "/"
 
@@ -136,8 +140,8 @@ class ShiftMember:
             "name": self.name,
             "cycle_type": cycle_type,
             "cycle_name": cycle_name,
-            "state": translate_shift_status(self.state), # type: ignore
-            "coop_state": translate_coop_status(self.coop_state), # type: ignore
+            "state": translate_shift_status(self.state),
+            "coop_state": translate_coop_status(self.coop_state),
             "std_counter": self.std_counter,
             "ftop_counter": self.ftop_counter
         }
@@ -145,25 +149,31 @@ class ShiftMember:
     @classmethod
     def from_record(cls, record: Record, cycle: Cycle | None = None) -> ShiftMember:
         """shift.registration record"""
+
+        partner = record.partner_id
+        shift = record.shift_id
+        assert isinstance(partner, Record)
+        assert isinstance(shift, Record)
+
         return cls(
-            partner_id = record.partner_id.id, # type: ignore
-            name = record.name, # type: ignore
-            barcode = record.partner_id.barcode_base, # type: ignore
-            shift_id = record.shift_id.id, # type: ignore
-            registration_id = record.id, # type: ignore
-            shift_type = record.shift_type, # type: ignore
-            begin = datetime.fromisoformat(record.date_begin) + timedelta(hours=2), # type: ignore
-            end = datetime.fromisoformat(record.date_begin) + timedelta(hours=4, minutes=45), # type: ignore
-            exchange_state = record.exchange_state, # type: ignore
-            state = record.state, # type: ignore
-            coop_state = record.partner_id.cooperative_state, # type: ignore
-            gender = record.partner_id.gender or "neutral", # type: ignore
-            leader = record.partner_id.is_squadleader, # type: ignore
-            std_counter = int(record.partner_id.final_standard_point), # type: ignore
-            ftop_counter = int(record.partner_id.final_ftop_point), # type: ignore
-            mail = record.partner_id.email or None, # type: ignore
-            has_associated_members = bool(record.partner_id.nb_associated_people), # type: ignore
-            is_associated_member = record.partner_id.is_associated_people, # type: ignore
+            partner_id = partner.id,
+            name = record.name,
+            barcode = partner.barcode_base,
+            shift_id = shift.id,
+            registration_id = record.id,
+            shift_type = record.shift_type,
+            begin = datetime.fromisoformat(record.date_begin) + timedelta(hours=2),
+            end = datetime.fromisoformat(record.date_begin) + timedelta(hours=4, minutes=45),
+            exchange_state = record.exchange_state,
+            state = record.state,
+            coop_state = partner.cooperative_state,
+            gender = partner.gender or "neutral",
+            leader = partner.is_squadleader,
+            std_counter = int(partner.final_standard_point),
+            ftop_counter = int(partner.final_ftop_point),
+            mail = partner.email or None,
+            has_associated_members = bool(partner.nb_associated_people),
+            is_associated_member = partner.is_associated_people,
             associated_members=[],
             cycle = cycle,
             cycle_type = "ftop" if cycle else "standard"
@@ -173,11 +183,11 @@ class ShiftMember:
     def associated_member_from_record(cls, record: Record) -> ShiftMember:
         """res.partner record"""
         return cls(
-            partner_id = record.id, # type: ignore
-            parent_partner_id = record.parent_id, # type: ignore
-            name = record.name, # type: ignore
-            barcode = record.barcode_base, # type: ignore
-            gender = record.gender or "neutral" # type: ignore
+            partner_id = record.id,
+            parent_partner_id = record.parent_id,
+            name = record.name,
+            barcode = record.barcode_base,
+            gender = record.gender or "neutral"
         )
 
     def add_associated_members(self, *members: ShiftMember) -> None:
@@ -254,20 +264,26 @@ class Shift(object):
         return f"<{self.__class__.__name__}: {self.shift_id} {self.name} {self.state}>"
 
     @classmethod
-    def from_record(cls, shift_record: Record, ticket_record: Record) -> Shift:
+    def from_record(cls, shift_record: Record, ticket_record: list[Record]) -> Shift:
         """Initialize Shift from `shift.shift` and `shift.ticket` records"""
-        tickets = {str(t.shift_type): t.id for t in ticket_record} # type: ignore
+        tickets = {str(t.shift_type): t.id for t in ticket_record}
+
+        shift_type = shift_record.shift_type_id
+        shift_template = shift_record.shift_template_id
+        assert isinstance(shift_type, Record)
+        assert isinstance(shift_template, Record)
+
         return cls(
-            shift_record.id, # type: ignore
-            shift_record.shift_type_id.id, # type: ignore
-            shift_record.shift_template_id.id, # type: ignore
-            tickets.get("standard", None), # type: ignore
-            tickets.get("ftop", None), # type: ignore
-            shift_record.name, # type: ignore
-            shift_record.week_name, # type: ignore
-            datetime.fromisoformat(shift_record.date_begin_tz), # type: ignore
-            datetime.fromisoformat(shift_record.date_end_tz), # type: ignore
-            shift_record.state, # type: ignore
+            shift_record.id,
+            shift_type.id,
+            shift_template.id,
+            tickets.get("standard", None),
+            tickets.get("ftop", None),
+            shift_record.name,
+            shift_record.week_name,
+            datetime.fromisoformat(shift_record.date_begin_tz),
+            datetime.fromisoformat(shift_record.date_end_tz),
+            shift_record.state,
             {}
         )
 

@@ -8,7 +8,7 @@ from sanic.response import json, HTTPResponse, empty
 from sanic_ext import render
 
 from accueil.channel import Channel
-from accueil.models.odoo import Odoo
+from accueil.models.odoo import OdooConnector
 from accueil.models.shift import Shift
 from accueil.exceptions import UnknownXmlrcpError, UnknownSocketError
 from accueil.utils import handle_odoo_exceptions
@@ -47,13 +47,14 @@ async def all_shifts_admin_view(request: Request) -> HTTPResponse:
 async def search_member(request: Request) -> HTTPResponse:
 
     data = request.json
-    odoo: Odoo = request.app.ctx.odoo
+    odoo: OdooConnector = request.app.ctx.odoo
     inp: str = data["input"]
-
-    if inp.isnumeric():
-        payload = odoo.get_members_from_barcodebase(int(inp))
-    else:
-        payload = odoo.get_members_from_name(inp)
+    
+    with odoo.make_session() as session:
+        if inp.isnumeric():
+            payload = session.get_members_from_barcodebase(int(inp))
+        else:
+            payload = session.get_members_from_name(inp)
 
     return json({"status": 200, "reasons": "Ok", "data": payload}, status=200)
 
@@ -74,7 +75,7 @@ async def registration(request: Request, ws: Websocket):
             message = payload["message"]
             data = payload["data"]
             if message == "attend":
-                odoo: Odoo = request.app.ctx.odoo
+                odoo: OdooConnector = request.app.ctx.odoo
                 shifts = request.app.ctx.shifts
 
                 shift = shifts.get(data["shift_id"])
@@ -83,11 +84,13 @@ async def registration(request: Request, ws: Websocket):
                     logger.error("ATTENDING operation on an Unknow member")
                     raise ValueError("Operation on an Unknow member")
 
-                odoo.set_attendancy(member)
+                with odoo.make_session() as session:
+                    session.set_attendancy(member)
                 logger.info(f"ATTENDING {member}")
                 await ws.send(js.dumps({"message":"closeCmodal", "data": data}))
+
             elif message == "reset":
-                odoo: Odoo = request.app.ctx.odoo
+                odoo: OdooConnector = request.app.ctx.odoo
                 shifts = request.app.ctx.shifts
 
                 shift = shifts.get(data["shift_id"])
@@ -95,18 +98,21 @@ async def registration(request: Request, ws: Websocket):
                 if member is None:
                     logger.error("RESET operation on an Unknow member")
                     raise ValueError("Operation on an Unknow member")
-                odoo.reset_attendancy(member)
+                
+                with odoo.make_session() as session:
+                    session.reset_attendancy(member)
                 logger.info(f"RESET {member}")
                 await ws.send(js.dumps({"message":"closeCmodal", "data": data}))
 
             elif message == "registrate":
-                odoo: Odoo = request.app.ctx.odoo
+                odoo: OdooConnector = request.app.ctx.odoo
                 cycles = request.app.ctx.cycles
                 shifts = request.app.ctx.shifts
                 shift: Shift = shifts.get(data["shift_id"])
 
-                registration_record = odoo.registrate_attendancy(data["partner_id"], shift)
-                member = odoo.build_member(registration_record, cycles)
+                with odoo.make_session() as session:
+                    registration_record = session.registrate_attendancy(data["partner_id"], shift)
+                    member = session.build_member(registration_record, cycles)
                 shift.add_shift_members(member)
                 payload["data"].update({"partner_id": member.partner_id, "html": member.into_html()})
                 logger.info(f"REGISTRATING {member}")

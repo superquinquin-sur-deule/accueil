@@ -7,6 +7,11 @@ class AccueilException(Exception):
     pass
 
 
+class OdooError(AccueilException):
+    status = 500
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
 # -- XMLRPC
 class TooManyRegistrationsSet(AccueilException):
     message = """Un membre ne peut pas s'inscrire à plus de 5 créneaux par 28 jours."""

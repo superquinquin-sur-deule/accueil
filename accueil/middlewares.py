@@ -33,6 +33,9 @@ async def log_exit(request: Request, response: HTTPResponse) -> None:
         perf = round(perf_counter() - request.ctx.t, 5)
 
     if response.status == 200:
+        size = 0
+        if response.body is not None:
+            size = len(response.body)
         logger.info(
-            f"{request.host} > {request.method} {request.url} [{request.load_json()}][{str(response.status)}][{str(len(response.body))}b][{perf}s]"
+            f"{request.host} > {request.method} {request.url} [{request.load_json()}][{str(response.status)}][{str(size)}b][{perf}s]"
         )

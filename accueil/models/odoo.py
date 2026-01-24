@@ -1,94 +1,117 @@
 from __future__ import annotations
 
+import os
 import time
 import logging
+from contextlib import ContextDecorator
 from xmlrpc.client import Fault
 from datetime import datetime, date, timedelta
 from functools import wraps
 from http.client import CannotSendRequest
-from attrs import define, field, validators
-from erppeek import Client, Record
+from erppeek import Client, Record, RecordList
 
-from typing import Any
+from typing import Any, Callable
 
 from accueil.models.shift import Shift, Cycle, ShiftMember
+from accueil.exceptions import OdooError
 from accueil.utils import get_appropriate_shift_type
 
 logger = logging.getLogger("odoo")
 
-@define(repr=False)
-class Odoo(object):
-    __login: str = field(validator=[validators.instance_of(str)]) # type: ignore
-    __password: str = field(validator=[validators.instance_of(str)]) # type: ignore
-    _db_name: str = field(validator=[validators.instance_of(str)])
-    _url: str = field(validator=[validators.instance_of(str)])
-    verbose: bool = field(default=False)
-    client: Client | None = field(default=None, init=False)
+Conditions = list[tuple[str, str, Any]]
+
+def resilient(degree: int = 3):
+    def decorator(f: Callable):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            self: OdooSession = args[0]
+            success, tries = False, 0
+            while success is False and tries <= degree:
+                try:
+                    res = f(*args, **kwargs)
+                    success = True
+                    return res
+                except (CannotSendRequest, AssertionError):
+                    tries += 1
+                    self.renew_session()
+            raise ConnectionError("Cannot establish connection with odoo.")
+        return wrapper
+    return decorator
+
+
+class OdooConnector(object):
+    """Odoo connection handler & session factory"""
+    host: str
+    database: str
+    verbose: bool
+
+    def __init__(self, host: str, database: str, verbose: bool = False, **kwargs):
+        self.host = host
+        self.database = database
+        self.verbose = verbose
+
+    def make_session(self, max_retries: int = 5, retries_interval: int = 5) -> OdooSession:
+        success, tries = False, 0
+        while (success is False and tries <= max_retries):
+            try:
+                session = OdooSession.initialize(self.host, self.database, self.verbose)
+                success = True
+                return session
+            except Exception:
+                time.sleep(retries_interval)
+                tries += 1
+        raise ConnectionError("Unable to generate an Odoo Session")
+        
+
+class OdooSession(ContextDecorator):
+    client: Client
+
+    def __init__(self, client: Client):
+        self.client = client
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, exc_tb):
+        del self
 
     @classmethod
-    def initialize(cls, login: str, password: str, db_name: str, url: str, verbose: bool= False) -> Odoo:
-        odoo = cls(
-            login,
-            password,
-            db_name,
-            url,
-            verbose
-        )
-        odoo.connect()
-        return odoo
+    def initialize(cls, host: str, database: str, verbose: bool) -> OdooSession:
+        client = cls._initialize_client(host, database, verbose)
+        return cls(client)
+    
+    @classmethod
+    def _initialize_client(cls, host: str, database: str, verbose: bool) -> Client:
+        username = os.environ.get("ERP_USERNAME", None)
+        password = os.environ.get("ERP_PASSWORD", None)
+        client = Client(host, verbose=verbose)
+        client.login(username, password=password, database=database)
+        return client
+        
+    def renew_session(self) -> None:
+        host = self.client._server
+        database = self.client._db
+        
+        assert isinstance(host, str)
+        assert isinstance(database, str)
+        
+        client = self._initialize_client(host, database, False)
+        self.client = client
 
-    def connect(self, max_retries: int=5) -> None:
-        if not all([self.__login, self.__password, self._url, self._db_name]):
-            raise ValueError("Odoo client badly initialized")
+    @resilient(degree=3)
+    def get(self, model: str, conditions: Conditions) -> Record | None:
+        return self.client.model(model).get(conditions)
 
-        _conn, _tries = False, 0
-        while (_conn is False and _tries <= max_retries):
-            try:
-                self.client = Client(self._url, verbose=self.verbose)
-                log = self.client.login(self.__login, password=self.__password, database=self._db_name)
-                user = self.client.ResUsers.browse(log) # type: ignore
-                tz = user.tz
-                _conn = True
-            except Exception as e:
-                time.sleep(5)
-                _tries += 1
+    @resilient(degree=3)
+    def browse(self, model: str, conditions: Conditions) -> Record | RecordList:
+        return self.client.model(model).browse(conditions)
 
-        if _conn is False:
-            raise ConnectionError("cannot connect to Odoo.")
-
-    def _refresher(f): # type: ignore
-        @wraps(f) # type: ignore
-        def wrapper(*args, **kwargs):
-            self = args[0]
-            _ok, _tries, _max_tries = False, 0, 3
-            while _tries <= _max_tries and _ok is False:
-                try:
-                    res = f(*args, **kwargs) # type: ignore
-                    _ok = True
-                except (CannotSendRequest, AssertionError):
-                    _tries += 1
-                    self.connect()
-            if _ok is False:
-                raise ConnectionError("cannot connect to odoo")
-            return res # type: ignore
-        return wrapper
-
-    @_refresher # type: ignore
-    def get(self, model: str, conds: list[tuple[str, str, Any]]):
-        result = self.client.model(model).get(conds) # type: ignore
-        return result
-
-    @_refresher # type: ignore
-    def browse(self, model: str, conds: list[tuple[str, str, Any]],  limit=None):
-        result = self.client.model(model).browse(conds,  limit) # type: ignore
-        return result
-
-    @_refresher # type: ignore
+    @resilient(degree=3)
     def create(self, model: str, object: dict[str, Any]):
-        result = self.client.model(model).create(object) # type: ignore
-        return result
+        return self.client.model(model).create(object)
+    
 
-    # --
+    # -- 
 
     def build_shifts(self, cycles: list[Cycle], ftop: bool = False) -> list[Shift]:
         """build shifts, shiftMembers and add members to shifts"""
@@ -117,9 +140,9 @@ class Odoo(object):
             ]
         )
         shifts = []
-        for shift_record in today_shifts: # type: ignore
+        for shift_record in today_shifts: 
             ticket_record = self.browse("shift.ticket",[("shift_id", "=", shift_record.id)])
-            shift = Shift.from_record(shift_record, ticket_record) # type: ignore
+            shift = Shift.from_record(shift_record, ticket_record) 
             shifts.append(shift)
         return shifts
 
@@ -134,14 +157,20 @@ class Odoo(object):
             ]
         )
         cycles = []
-        for shift_record in shift_records: # type: ignore
+        for shift_record in shift_records:
             cycle = Cycle.from_record(shift_record)
             if cycle.is_current():
                 cycles.append(cycle)
         return cycles
 
     def is_from_cycle(self, cycle: Cycle , member: Record) -> bool:
-        return bool(self.get("shift.registration", [("shift_id", "=", cycle.shift_id), ("partner_id.id", "=", member.partner_id.id)]))
+        partner = member.partner_id
+        if partner is None:
+            raise OdooError(f"Partner record not found for member from shift.registration.id: {str(member.id)}")
+        assert isinstance(partner, Record)
+
+        reg = self.get("shift.registration", [("shift_id", "=", cycle.shift_id), ("partner_id.id", "=", partner.id)])
+        return bool(reg)
 
     def get_member_cycle(self, member: Record, cycles: list[Cycle]) -> Cycle | None:
         for cycle in cycles:
@@ -159,62 +188,77 @@ class Odoo(object):
 
     def get_shift_members(self, shift_id: int, cycles: list[Cycle]) -> list[ShiftMember]:
         shift_members = self.browse("shift.registration", [("shift_id", "=", shift_id)])
-        members = [self.build_member(shift_member, cycles) for shift_member in shift_members] # type: ignore
+        members = [self.build_member(shift_member, cycles) for shift_member in shift_members] 
         return members
 
     def get_associated_members(self, parent_id: int) -> list[ShiftMember]:
         associated_records = self.browse("res.partner", [("parent_id", "=", parent_id)])
         associated_members = []
-        for associated_record in associated_records: # type: ignore
+        for associated_record in associated_records: 
             associated_member = ShiftMember.associated_member_from_record(associated_record)
             associated_members.append(associated_member)
         return associated_members
 
     def get_member_record(self, partner_id: int) -> Record:
-        return self.get("res.partner", [("id", "=", partner_id)]) # type: ignore
+        return self.get("res.partner", [("id", "=", partner_id)]) 
 
     def get_members_from_barcodebase(self, barcode_base: int):
         """limit to the 25 first elements"""
         members = self.browse("res.partner", [("barcode_base","=", barcode_base), ("cooperative_state", "not in", ["unsubscribed"])])
-        payload = [{"partner_id": m.id, "name": m.name, "barcode_base": m.barcode_base} for m in members[:25]] # type: ignore
+        payload = [{"partner_id": m.id, "name": m.name, "barcode_base": m.barcode_base} for m in members[:25]] 
         return payload
 
     def get_members_from_name(self, name: str):
         """limit to the 25 first elements"""
         members = self.browse("res.partner",[("name","ilike", name),("cooperative_state", "not in", ["unsubscribed"])])
-        payload = [{"partner_id": m.id, "name": m.name, "barcode_base": m.barcode_base} for m in members[:25]] # type: ignore
+        payload = [{"partner_id": m.id, "name": m.name, "barcode_base": m.barcode_base} for m in members[:25]] 
         return payload
 
     # --
 
     def set_attendancy(self, member: ShiftMember) -> None:
-        service: Record = self.get("shift.registration", [("id", "=", member.registration_id)]) # type: ignore
+        service: Record = self.get("shift.registration", [("id", "=", member.registration_id)]) 
         service.state = "done"
         member.state = "done"
 
     def reset_attendancy(self, member: ShiftMember) -> None:
-        service: Record = self.get("shift.registration", [("id", "=", member.registration_id)]) # type: ignore
+        service: Record = self.get("shift.registration", [("id", "=", member.registration_id)]) 
         service.state = "open"
         member.state = "open"
 
     def registrate_attendancy(self, partner_id: int, shift: Shift) -> Record:
         member_record = self.get_member_record(partner_id)
-        if member_record.is_associated_people:
-            member_record = self.get_member_record(member_record.parent_id.id) # type: ignore
 
-        shift_type: str = member_record.shift_type # type: ignore
+        if member_record.is_associated_people:
+            parent = member_record.parent_id
+            if parent is None:
+                raise OdooError(f"Partner record not found for member from res.partner: {str(member_record.id)}")
+            assert isinstance(parent, Record)
+            
+            parent_id = parent.id
+            assert isinstance(parent_id, int)
+            member_record = self.get_member_record(parent_id) 
+
+        shift_type = member_record.shift_type 
+        assert isinstance(shift_type, str)
+
         if shift_type == "standard":
-            std_points: int = int(member_record.final_standard_point) # type: ignore
+            std = member_record.final_standard_point
+            assert isinstance(std, str) and std.isnumeric()
+
+            std_points = int(std)
             shift_type = get_appropriate_shift_type(shift_type, std_points)
         shift_ticket_id = getattr(shift, f"{shift_type}_ticket_id")
 
-        service = self.create("shift.registration", {
-            "partner_id": member_record.id,
-            "shift_id": shift.shift_id,
-            "shift_type": shift_type,
-            "shift_ticket_id": shift_ticket_id,
-            "related_shift_state": 'confirm',
-            "state": 'open'
+        service = self.create(
+            "shift.registration", 
+            {
+                "partner_id": member_record.id,
+                "shift_id": shift.shift_id,
+                "shift_type": shift_type,
+                "shift_ticket_id": shift_ticket_id,
+                "related_shift_state": 'confirm',
+                "state": 'open'
             }
         )
         service.state = "done"
@@ -226,7 +270,7 @@ class Odoo(object):
         for member in absent_members:
             try:
                 registration = self.get("shift.registration", [("id","=", member.registration_id)])
-                registration.button_reg_absent() # type: ignore
+                registration.button_reg_absent() 
             except Fault:
                 # bypass Marshall None Error. 
                 pass
@@ -243,8 +287,9 @@ class Odoo(object):
     def close_shift(self, shift: Shift) -> None:
         record = self.get("shift.shift", [("id", "=", shift.shift_id)])
         try:
-            record.button_done() # type: ignore
+            record.button_done() 
         except Exception as e:
             # marshall none
             print(e)
             pass
+

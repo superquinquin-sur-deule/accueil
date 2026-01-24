@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 from typing import Callable
 
-from accueil.models.odoo import Odoo
+from accueil.models.odoo import OdooConnector, OdooSession
 from accueil.models.shift import Shift
 from accueil.channel import Channel
 from accueil.mail import MailManager
@@ -43,8 +43,9 @@ class Task(object):
 
     async def refresh(self, app: Sanic) -> None:
         cycles = app.ctx.cycles
-        odoo: Odoo = app.ctx.odoo
-        members = odoo.get_shift_members(self.shift_id, cycles)
+        odoo: OdooConnector = app.ctx.odoo
+        with odoo.make_session() as session:
+            members = session.get_shift_members(self.shift_id, cycles)
         shift: Shift = app.ctx.shifts.get(self.shift_id, None)
         if shift is None:
             raise UnknownShift()
@@ -72,11 +73,11 @@ class Scheduler(object):
 
     async def initialize_queue(self, app: Sanic) -> None:
         """first tasks of the day"""
-        odoo: Odoo = app.ctx.odoo
-
-        cycles = odoo.get_cycles()
-        shifts = odoo.build_shifts(cycles)
-        ftop_shifts = odoo.build_shifts(cycles, ftop=True)
+        odoo: OdooConnector = app.ctx.odoo
+        with odoo.make_session() as session:
+            cycles = session.get_cycles()
+            shifts = session.build_shifts(cycles)
+            ftop_shifts = session.build_shifts(cycles, ftop=True)
         app.ctx.cycles = cycles
         app.ctx.ftop_shifts = {shift.shift_id:shift for shift in ftop_shifts}
         app.ctx.shifts = {shift.shift_id:shift for shift in shifts}
@@ -90,24 +91,27 @@ class Scheduler(object):
         close_ftop = getattr(app.config, "AUTO_CLOSE_FTOP_SHIFT", False)
         send_absence_mails = getattr(app.config, "AUTO_ABSENCE_MAILS", False)
 
-        odoo: Odoo = app.ctx.odoo
+        odoo: OdooConnector = app.ctx.odoo
         shifts: dict[int, Shift] = app.ctx.shifts
         ftop_shifts: dict[int, Shift] = app.ctx.ftop_shifts
         mail_manager: MailManager|None = app.ctx.mail_manager
 
+        
         if set_absences:
             logger.info("SETTING REGULAR SHIFTS ABSENCES...")
-            odoo.set_regular_shifts_absences(list(shifts.values()))
+            with odoo.make_session() as session:
+                session.set_regular_shifts_absences(list(shifts.values()))
             if close_shifts:
                 logger.info("CLOSING REGULAR SHIFTS...")
-                odoo.close_shifts(list(shifts.values()))
+                session.close_shifts(list(shifts.values()))
             if send_absence_mails and MailManager is not None:
                 logger.info("EMAILING REGULAR SHIFTS ABSENCES...")
                 [mail_manager.send_absence_mails(shift) for shift in shifts.values()] # type: ignore
 
         if close_ftop:
             logger.info("CLOSING FTOP SHIFTS...")
-            odoo.close_shifts(list(ftop_shifts.values()))
+            with odoo.make_session() as session:
+                session.close_shifts(list(ftop_shifts.values()))
 
     def _build_queue(self, app: Sanic) -> None:
         early = getattr(app.config, "ACCEPT_EARLY_ENTRANCE", {"minutes": 15})
