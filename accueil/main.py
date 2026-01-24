@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from sanic import Sanic
 from sanic.log import LOGGING_CONFIG_DEFAULTS
 
@@ -15,15 +16,6 @@ from accueil.middlewares import go_fast, log_exit, error_handler
 from accueil.loaders import ConfigLoader
 
 Payload = dict[str, Any]
-
-BANNER = """\
-   _____ ____  ____    ___                        _ __
-  / ___// __ \/ __ \  /   | ____________  _____  (_) /
-  \__ \/ / / / / / / / /| |/ ___/ ___/ / / / _ \/ / /
- ___/ / /_/ / /_/ / / ___ / /__/ /__/ /_/ /  __/ / /
-/____/\___\_\___\_\/_/  |_\___/\___/\__,_/\___/_/_/
-                                            v1.0.0
-"""
 
 class Accueil:
     def __init__(
@@ -68,12 +60,18 @@ class Accueil:
     @classmethod
     def create_app(cls) -> Accueil:
         fp = os.environ.get("CONFIG_FILEPATH", "./configs/config.yaml")
-        cfg = ConfigLoader().load(fp)
+        cfg = ConfigLoader(main_configs_name="app").load(fp)
         return cls(**cfg)
 
     def print_banner(self) -> None:
-        print(BANNER)
-        print(f"Booting {self.env}")
+        banner = Path("accueil/BANNER").read_text()
+        version = Path("accueil/VERSION").read_text()
+
+        annot = f"v{version}"
+        banner = banner[:-len(annot)] + annot
+
+        print(banner)
+        print(f"Booting: {self.env}")
 
     def setup_logging_configs(self, logging: dict[str, Any] | None) -> dict[str, Any]:
         if logging is None:

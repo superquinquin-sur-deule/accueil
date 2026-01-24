@@ -1,18 +1,16 @@
-import os
-import json
-from abc import ABC, abstractmethod
-import yaml
-import warnings
-from yaml import SafeLoader
-from typing import Any
-from collections import defaultdict, ChainMap
-
 import re
+import os
+import yaml
 from pathlib import Path
-from typing import Type
+from yaml import SafeLoader
+from collections import defaultdict
+from abc import ABC, abstractmethod
+
+from typing import Any, Type
 
 Payload = dict[str, Any]
 ESCAPED = ["\\" ,"^" ,"$" ,"." ,"|" ,"?" ,"*" ,"+" ,"(" ,")" ,"[" ,"]" ,"{" ,"}"]
+
 
 class Loader(ABC):
     @abstractmethod
@@ -50,18 +48,19 @@ class Pattern(object):
         return bool(re.search(re.compile(self.find), s))
 
     def _escaped(self) -> tuple[str, str]:
-        prefix = "".join([c if c not in ESCAPED else f"\{c}" for c in self.prefix])
-        suffix = "".join([c if c not in ESCAPED else f"\{c}" for c in self.suffix])
+        prefix = "".join([c if c not in ESCAPED else f"\\{c}" for c in self.prefix])
+        suffix = "".join([c if c not in ESCAPED else f"\\{c}" for c in self.suffix])
         return (prefix, suffix)
+
 
 class ConfigLoader:
     def __init__(
         self, 
-        d: dict[str, Any]=None, 
+        d: dict[str, Any] | None = None, 
         environ_pattern: Pattern = Pattern("${", "}"), 
         template_pattern: Pattern = Pattern("{{", "}}"),
-        allow_env_specific_merging: bool=False,
-        main_configs_name: str= "app"
+        allow_env_specific_merging: bool = False,
+        main_configs_name: str | None = None
     ) -> None:
         self.environ_pattern = environ_pattern
         self.template_pattern = template_pattern
@@ -99,8 +98,11 @@ class ConfigLoader:
 
         if self.allow_env_specific_merging:
             self._merge()
-        else:
+        
+        if self.main_configs_name is not None:
             self.d = self.d.get(self.main_configs_name)
+
+        assert self.d is not None
         return self.d
 
     def _map(self, d: dict[str, Any], location: list[str]) -> dict[str, Any]:
@@ -131,12 +133,15 @@ class ConfigLoader:
         env = os.environ.get(self.environ_pattern.key(value), None)
         if env is None:
             raise KeyError(f"ENV variable {key} not found.")
-        return env
+        return env.strip()
 
     def _get_template_value(self, value: str) -> Any:
         return self.template.get(self.template_pattern.key(value), None)
         
     def _merge(self) -> dict[str, Any]:
+        assert self.d is not None
+        assert self.main_configs_name is not None
+
         env = os.environ.get("ENV", None)
         main_config = self.d.get(self.main_configs_name, None)
 
