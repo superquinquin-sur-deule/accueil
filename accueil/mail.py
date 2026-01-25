@@ -80,10 +80,11 @@ class MailManager(object):
     __password: str = field(validator=[validators.instance_of(str)]) # type: ignore
     _smtp_server: str = field(validator=[validators.instance_of(str)])
     _smtp_port: int = field(default=587, validator=[validators.instance_of(int)])
-    templates: dict[str, MailTemplate] = field(default={}, validator=[validators.instance_of(dict)])
-    conditions: list[SendingConditions] = field(default=[], validator=[validators.instance_of(list)])
-    senders: dict[str, Mail] = field(default={}, validator=[validators.instance_of(dict)])
-    variables: dict[str, dict] = field(default={}, validator=[validators.instance_of(dict)])
+    templates: dict[str, MailTemplate] = field(factory=dict, validator=[validators.instance_of(dict)])
+    conditions: list[SendingConditions] = field(factory=list, validator=[validators.instance_of(list)])
+    senders: dict[str, Mail] = field(factory=dict, validator=[validators.instance_of(dict)])
+    receivers: dict[str, list[str]] = field(factory=dict, validator=[validators.instance_of(dict)])
+    variables: dict[str, dict] = field(factory=dict, validator=[validators.instance_of(dict)])
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}(server: {self._smtp_server}, port: {self._smtp_port})>"
@@ -99,6 +100,7 @@ class MailManager(object):
         templates_paths: dict[str, StrOrPath],
         conditions: dict[str, Any],
         senders: dict[str, Mail],
+        receivers: dict[str, str|list[str]],
         variables: dict[str, dict]
         ) -> MailManager:
         manager = cls(
@@ -111,6 +113,7 @@ class MailManager(object):
         )
         manager.register_templates_folders(**templates_paths)
         manager.register_conditions(conditions)
+        manager.register_receivers(**receivers)
         return manager
 
     def register_templates_folders(self, *templates_folders, **named_templates_folders) -> None:
@@ -130,6 +133,16 @@ class MailManager(object):
     def register_sender(self, **kwargs: Mail) -> None:
         self.senders.update(kwargs)
 
+    def register_receivers(self, **groups: str | list[str]) -> None:
+        for k, v in groups.items():
+            if isinstance(v, str):
+                rx = [r.strip() for r in v.split(",")]
+                self.receivers.update({k:rx})
+            elif isinstance(v, list):
+                self.receivers.update({k:v})
+            else:
+                raise ValueError("Mail receives are either a `,` separated string or a list of strings")
+            
     def format_mail(self, shift: Shift,  member: ShiftMember, template_name: str, tx: str, rx: list[Mail]) -> MIMEText:
         personalization = self._personalization_payload(shift, member)
         template = self.get_template(template_name)
@@ -201,3 +214,24 @@ class MailManager(object):
                 logger.info(f"SENDING abs mailing for {member.name} ({member.partner_id})")
             except Exception as e:
                 logger.error(f"Failed abs mailing for {member.name} ({member.partner_id}): {str(e)}")
+
+    def send_alert(self, shift: Shift, trace: str) -> None:
+        receivers = self.receivers.get("alert", None)
+        template = self.templates.get("alert", None)
+        if receivers is None or template is None:
+            return
+
+        sender = self.get_sender("bdm")
+
+        mail = template.to_mimeText(
+            sender, 
+            receivers, 
+            shift_name = shift.name,
+            shift_id = shift.shift_id,
+            shift_begin = shift.begin,
+            shift_end = shift.end,
+            trace = trace
+            )        
+        self.send_group("bdm", receivers, mail)
+
+

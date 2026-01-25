@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import logging
+import traceback
 from contextlib import ContextDecorator
 from xmlrpc.client import Fault
 from datetime import datetime, date, timedelta
@@ -113,9 +114,15 @@ class OdooSession(ContextDecorator):
 
     # -- 
 
-    def build_shifts(self, cycles: list[Cycle], ftop: bool = False) -> list[Shift]:
-        """build shifts, shiftMembers and add members to shifts"""
-        shifts = self.get_today_shifts(ftop=ftop)
+    def today_shifts(self, ftop: bool = False, cycles: list[Cycle] | None = None) -> tuple[list[Shift], list[Cycle]]:
+        dt = datetime.now()
+        shifts, cycles = self.build_shifts(dt, ftop, cycles)
+        return (shifts, cycles)
+
+    def build_shifts(self, dt: datetime, ftop: bool = False, cycles: list[Cycle] | None = None) -> tuple[list[Shift], list[Cycle]]:
+        if cycles is None:
+            cycles = self.collect_cycles(dt)
+        shifts = self.collect_shifts(dt, ftop)
         for shift in shifts:
             if ftop is False:
                 # not interacting with ftop members. only use of ftop shift is for closing.
@@ -124,14 +131,14 @@ class OdooSession(ContextDecorator):
                 logger.info(f"COLLECTING {shift} ...")
                 members = self.get_shift_members(shift.shift_id, cycles)
                 shift.add_shift_members(*members)
-        return shifts
+        return (shifts, cycles)   
 
-    def get_today_shifts(self, ftop: bool = False) -> list[Shift]:
-        floor = datetime.combine(date.today(), datetime.min.time())
-        ceiling = datetime.combine(date.today(), datetime.max.time())
+    def collect_shifts(self, dt: datetime, ftop: bool = False) -> list[Shift]:
+        floor = datetime.combine(dt, datetime.min.time())
+        ceiling = datetime.combine(dt, datetime.max.time())
         shift_type = 1 if ftop is False else 2
 
-        today_shifts = self.browse(
+        shifts_records = self.browse(
             "shift.shift",
             [
                 ("date_begin_tz", ">=", floor.isoformat()),
@@ -140,19 +147,19 @@ class OdooSession(ContextDecorator):
             ]
         )
         shifts = []
-        for shift_record in today_shifts: 
+        for shift_record in shifts_records: 
             ticket_record = self.browse("shift.ticket",[("shift_id", "=", shift_record.id)])
             shift = Shift.from_record(shift_record, ticket_record) 
             shifts.append(shift)
         return shifts
 
-    def get_cycles(self) -> list[Cycle]:
+    def collect_cycles(self, dt: datetime) -> list[Cycle]:
         """names: "Service volants - DSam. - 21:00", "Service volants - BSam. - 21:00" """
         shift_records = self.browse(
             "shift.shift",
             [
-                ("date_begin",">", datetime.now() - timedelta(hours=10)),
-                ("date_begin","<=", datetime.now() + timedelta(days=28)),
+                ("date_begin",">", dt - timedelta(hours=10)),
+                ("date_begin","<=", dt + timedelta(days=28)),
                 ("name", "in", ["Service volants - DSam. - 21:00", "Service volants - BSam. - 21:00"])
             ]
         )
@@ -162,6 +169,7 @@ class OdooSession(ContextDecorator):
             if cycle.is_current():
                 cycles.append(cycle)
         return cycles
+
 
     def is_from_cycle(self, cycle: Cycle , member: Record) -> bool:
         partner = member.partner_id
@@ -271,11 +279,8 @@ class OdooSession(ContextDecorator):
             try:
                 registration = self.get("shift.registration", [("id","=", member.registration_id)])
                 registration.button_reg_absent() 
-            except Fault:
-                # bypass Marshall None Error. 
-                pass
-            except Exception:
-                logger.warning(f"Cannot set member absence: {member.name}")
+            except Exception as e:
+                self._filter_xmlrpc_faults(e, raise_excpt=False)
         return absent_members
 
     def set_regular_shifts_absences(self, shifts: list[Shift]) -> list[list[ShiftMember]]:
@@ -289,7 +294,32 @@ class OdooSession(ContextDecorator):
         try:
             record.button_done() 
         except Exception as e:
-            # marshall none
-            print(e)
-            pass
+            self._filter_xmlrpc_faults(e, raise_excpt=True)
+
+    def _filter_xmlrpc_faults(self, excpt: Exception, raise_excpt: bool = False) -> None:
+        """
+        xmlrpc tend to act weirdly.
+        Fault.faultCode should theorically be a int. However, this namespace is usually used to store error messages...
+        Fault..faultString should theorically contain the error message. However, this namespace is usually used to store the xmlrpc trace of the exception...
+
+        pass on marshall None exceptions
+        raise on every other xmlrpc faults
+        """
+        trace = traceback.format_exc()
+
+        if (
+            isinstance(excpt, Fault) and
+            isinstance(excpt.faultCode, str) and 
+            excpt.faultCode.__contains__("cannot marshal None unless allow_none is enabled")
+        ):
+            # -- Bypass MARSHALL EXCEPTION
+            logger.warning("Bypass Marshal None exception")
+        elif raise_excpt is False:
+            logger.error(excpt)
+            logger.error(trace)
+            return
+        else:
+            logger.error(excpt)
+            logger.error(trace)
+            raise excpt
 

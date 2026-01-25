@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import traceback
 import logging
 from sanic import Sanic
 from threading import Timer
@@ -75,9 +76,8 @@ class Scheduler(object):
         """first tasks of the day"""
         odoo: OdooConnector = app.ctx.odoo
         with odoo.make_session() as session:
-            cycles = session.get_cycles()
-            shifts = session.build_shifts(cycles)
-            ftop_shifts = session.build_shifts(cycles, ftop=True)
+            shifts, cycles = session.today_shifts()
+            ftop_shifts,_ = session.today_shifts(ftop=True, cycles=cycles)
         app.ctx.cycles = cycles
         app.ctx.ftop_shifts = {shift.shift_id:shift for shift in ftop_shifts}
         app.ctx.shifts = {shift.shift_id:shift for shift in shifts}
@@ -94,24 +94,44 @@ class Scheduler(object):
         odoo: OdooConnector = app.ctx.odoo
         shifts: dict[int, Shift] = app.ctx.shifts
         ftop_shifts: dict[int, Shift] = app.ctx.ftop_shifts
-        mail_manager: MailManager|None = app.ctx.mail_manager
+        mail_manager: MailManager | None = app.ctx.mail_manager
 
         
         if set_absences:
             logger.info("SETTING REGULAR SHIFTS ABSENCES...")
             with odoo.make_session() as session:
                 session.set_regular_shifts_absences(list(shifts.values()))
-            if close_shifts:
-                logger.info("CLOSING REGULAR SHIFTS...")
-                session.close_shifts(list(shifts.values()))
-            if send_absence_mails and MailManager is not None:
+
+                if close_shifts:
+                    logger.info("CLOSING REGULAR SHIFTS...")
+                    for shift in shifts.values():
+                        logger.info(f"CLOSING {shift}")
+                        try:
+                            session.close_shift(shift)
+                        except Exception as e:
+                            trace = traceback.format_exc()
+                            logger.error(e)
+                            logger.error(trace)
+                            if mail_manager is not None:
+                                mail_manager.send_alert(shift, trace)
+
+            if send_absence_mails and mail_manager is not None:
                 logger.info("EMAILING REGULAR SHIFTS ABSENCES...")
-                [mail_manager.send_absence_mails(shift) for shift in shifts.values()] # type: ignore
+                [mail_manager.send_absence_mails(shift) for shift in shifts.values()] 
 
         if close_ftop:
             logger.info("CLOSING FTOP SHIFTS...")
             with odoo.make_session() as session:
-                session.close_shifts(list(ftop_shifts.values()))
+                for shift in ftop_shifts.values():
+                    logger.info(f"CLOSING FTOP {shift}")
+                    try:
+                        session.close_shift(shift)
+                    except Exception as e:
+                        trace = traceback.format_exc()
+                        logger.error(e)
+                        logger.error(trace)
+                        if mail_manager is not None:
+                            mail_manager.send_alert(shift, trace)
 
     def _build_queue(self, app: Sanic) -> None:
         early = getattr(app.config, "ACCEPT_EARLY_ENTRANCE", {"minutes": 15})
