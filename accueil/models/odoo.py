@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 import logging
 import traceback
@@ -44,31 +43,39 @@ class OdooConnector(object):
     """Odoo connection handler & session factory"""
     host: str
     database: str
+    login: str
+    password: str
     verbose: bool
 
-    def __init__(self, host: str, database: str, verbose: bool = False, **kwargs):
+    def __init__(self, host: str, database: str, login: str, password: str, verbose: bool = False, **kwargs):
         self.host = host
         self.database = database
+        self.login = login
+        self.password = password
         self.verbose = verbose
 
     def make_session(self, max_retries: int = 5, retries_interval: int = 5) -> OdooSession:
         success, tries = False, 0
         while (success is False and tries <= max_retries):
             try:
-                session = OdooSession.initialize(self.host, self.database, self.verbose)
+                session = OdooSession.initialize(self.host, self.database, self.login, self.password, self.verbose)
                 success = True
                 return session
             except Exception:
                 time.sleep(retries_interval)
                 tries += 1
         raise ConnectionError("Unable to generate an Odoo Session")
-        
+
 
 class OdooSession(ContextDecorator):
     client: Client
+    login: str
+    password: str
 
-    def __init__(self, client: Client):
+    def __init__(self, client: Client, login: str, password: str):
         self.client = client
+        self.login = login
+        self.password = password
 
     def __enter__(self):
         return self
@@ -77,26 +84,24 @@ class OdooSession(ContextDecorator):
         del self
 
     @classmethod
-    def initialize(cls, host: str, database: str, verbose: bool) -> OdooSession:
-        client = cls._initialize_client(host, database, verbose)
-        return cls(client)
-    
+    def initialize(cls, host: str, database: str, login: str, password: str, verbose: bool) -> OdooSession:
+        client = cls._initialize_client(host, database, login, password, verbose)
+        return cls(client, login, password)
+
     @classmethod
-    def _initialize_client(cls, host: str, database: str, verbose: bool) -> Client:
-        username = os.environ.get("ERP_USERNAME", None)
-        password = os.environ.get("ERP_PASSWORD", None)
+    def _initialize_client(cls, host: str, database: str, login: str, password: str, verbose: bool) -> Client:
         client = Client(host, verbose=verbose)
-        client.login(username, password=password, database=database)
+        client.login(login, password=password, database=database)
         return client
-        
+
     def renew_session(self) -> None:
         host = self.client._server
         database = self.client._db
-        
+
         assert isinstance(host, str)
         assert isinstance(database, str)
-        
-        client = self._initialize_client(host, database, False)
+
+        client = self._initialize_client(host, database, self.login, self.password, False)
         self.client = client
 
     @resilient(degree=3)
